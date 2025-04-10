@@ -1,91 +1,116 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 #-*- encoding=utf8 -*-
 
 # GIMP Plug-in for the DDS file format
-# Copyright (C) 2021 by Scriptkitz <scriptkitz@gmail.com>
+# Copyright (C) 2025 by Scriptkitz <scriptkitz@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 3 of the License, or
 # (at your option) any later version.
 
-import re
-import os.path
-import shutil
-import tempfile
-import subprocess
-from gimpfu import *
+import gi
+gi.require_version('Gimp', '3.0')
+from gi.repository import Gimp
+gi.require_version('Gegl', '0.4')
+from gi.repository import Gegl
+gi.require_version('GimpUi', '3.0')
+from gi.repository import GimpUi
+
+from gi.repository import GObject
+from gi.repository import GLib
+from gi.repository import Gio
+
+import os, sys, tempfile, zipfile
+import xml.etree.ElementTree as ET
+
+import re, subprocess, shutil
 
 
-def run_smart(args):
+NESTED_STACK_END = object()
+
+def conv_tga(filename, dest):
     try:
-        # argline = ' '.join(['"' + x + '"' for x in args])
+        args = [
+            os.path.join(os.path.dirname(__file__), "texconv.exe"), 
+            "-ft", "TGA", "-o", dest, filename
+        ]
         subprocess.check_call(args, shell=True)
     except Exception as ex:
-        gimp_log("Error: %s"%str(ex))
+        Gimp.message("Error0: %s"%str(ex))
     
-def run_need(args):
+def check_bc6_bc7(filename):
     try:
-        out = subprocess.check_output(args, shell=True)
+        args = [
+            os.path.join(os.path.dirname(__file__), "texdiag.exe"),
+            "info", "-nologo",
+            filename
+        ]
+        out = subprocess.check_output(args, shell=True).decode("utf-8")
         g = re.search("format = (\w*)", out)
         if g is not None:
             f = g.group(1)
             if f.startswith("BC6") or f.startswith("BC7"):
                 return True
     except Exception as ex:
-        gimp_log("Error: %s"%str(ex))
+        Gimp.message("Error1: %s"%str(ex))
     return False
 
-def load_dds_texconv( filename, raw_filename, no, bSepAlpha, bLoadMips, bFlipV):
-    # gimp_log((filename, raw_filename, no, bSepAlpha, bLoadMips, bFlipV))
-    BINARY = os.path.join(os.path.dirname(__file__), "texdiag.exe")
-    if not run_need([BINARY, "info", "-nologo", filename.encode('gbk')]):
-        return pdb['file-dds-load'](filename, raw_filename, bLoadMips, True)
+def load_dds(procedure, run_mode, file, metadata, flags, config, data):
+    #if run_mode == Gimp.RunMode.INTERACTIVE:
+    filename = file.peek_path()
+    if not check_bc6_bc7(filename):
+        builtin_proc = Gimp.get_pdb().lookup_procedure("file-dds-load")
+        config = builtin_proc.create_config()
+        config.set_property("file", file)
+        config.set_property("run-mode", run_mode)
+        return builtin_proc.run(config), flags
     fname = os.path.splitext(os.path.basename(filename))[0]
     tmp = tempfile.mkdtemp("-gimp-dds-load")
     try:
-        result = os.path.join(tmp, "%s.png"%fname)
-        BINARY = os.path.join(os.path.dirname(__file__), "texconv.exe")
-        run_smart([BINARY, "-ft", "PNG", "-o", tmp, filename.encode('gbk')])
-        return pdb['file-png-load'](result, raw_filename)
+        conv_tga(filename, tmp)
+        newfile = Gio.File.new_for_path(os.path.join(tmp, "%s.tga"%fname))
+        builtin_proc = Gimp.get_pdb().lookup_procedure("file-tga-load")
+        config = builtin_proc.create_config()
+        config.set_property("run-mode", run_mode)
+        config.set_property("file", newfile)
+        return builtin_proc.run(config), flags
     except Exception as ex:
-        pdb.gimp_message("Exception:\n"+str(ex))
+        Gimp.message("Exception:\n"+str(ex))
     finally:
         shutil.rmtree(tmp)
-        # pass
 
     return None
+    
+class FileDDSTexconv (Gimp.PlugIn):
+    def do_set_i18n(self, procname):
+        return False
 
-def register_load_handlers():
-    gimp.register_load_handler('file-dds-texconv-load', 'dds', '')
-    # 注册mime处理句柄名,打开这类mime类型文件时候调用此处理句柄
-    # pdb['gimp-register-file-handler-mime']('file-dds-texconv-load', 'image/vnd-ms.dds') 
+    def do_query_procedures(self):
+        return [ 'file-dds-texconv-load' ]
 
-def gimp_log(text):
-    pdb.gimp_message(text)
+    def do_create_procedure(self, name):
+        if name == 'file-dds-texconv-load':
+            procedure = Gimp.LoadProcedure.new (self, name,
+                                                Gimp.PDBProcType.PLUGIN,
+                                                load_dds, None)
+            procedure.set_menu_label("Load DDS (Texconv)")
+            procedure.set_documentation ('load a DDS file with texconv.',
+                                         'load a DDS file with texconv for GIMP3.',
+                                         name)
+            procedure.set_extensions ("dds")
+            # procedure.add_boolean_argument(
+            #     "sepAlpha", "sepAlpha", 
+            #     "Load Alpha as Channel Instead of Transparency", 
+            #     False, 
+            #     GObject.ParamFlags.READWRITE)
+        else:
+            raise ValueError('Unknown procedure "%s"' % name)
+        
+        procedure.set_attribution('scriptkitz', #author
+                                  'scriptkitz', #copyright
+                                  '2025') #year
+        return procedure
 
-register(
-    'file-dds-texconv-load',
-    'load a DDS file with texconv.',
-    'load a DDS file with texconv.',
-    'scriptkitz',
-    'scriptkitz',
-    '2021',
-    'Label DDS',
-    '*',
-    [
-        (PF_STRING, 'filename', 'The name of the file to load', ""),
-        (PF_STRING, 'fawfilename', 'The name entered', ""),
-        (PF_STRING, 'None', 'None', None), # 不知道为啥必须加这个，不然下面的选项就少一个
-        (PF_TOGGLE, 'sepAlpha', 'Load Alpha as Channel Instead of Transparency', False),
-        (PF_TOGGLE, 'loadMips', 'Load Mipmaps', False),
-        (PF_TOGGLE, 'flipV', 'Flip Vertically', False)
-    ],
-    [(PF_IMAGE, 'image', 'Output image')], 
-    load_dds_texconv,
-    on_query=register_load_handlers,
-    # menu="<Load>",
-    menu='<Image>/File/OpenWith...'
-)
 
-main()
+Gimp.main(FileDDSTexconv.__gtype__, sys.argv)
