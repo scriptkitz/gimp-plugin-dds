@@ -1,2 +1,2 @@
 # gimp-plugin-dds
-No longer needed
+Support exporting DDS format files in bc7 for GIMP 3.x.
