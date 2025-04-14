@@ -33,12 +33,33 @@ def conv_tga(filename, dest):
     try:
         args = [
             os.path.join(os.path.dirname(__file__), "texconv.exe"), 
-            "-ft", "TGA", "-o", dest, filename
+            "-ft", "tga", "-o", dest, filename
         ]
         subprocess.check_call(args, shell=True)
     except Exception as ex:
         Gimp.message("Error0: %s"%str(ex))
+
+def conv_dds(filename, dest, bMipmaps, bPow2):
+    try:
+        args = [
+            os.path.join(os.path.dirname(__file__), "texconv.exe"), 
+            "-ft", "dds", 
+            "-f", "BC7_UNORM",
+            "-y",
+            "-o", dest, filename
+        ]
+        
+        if bMipmaps:
+            args.extend(["-m", "0"])
+        else:
+            args.extend(["-m", "1"])
+        if bPow2:
+            args.append("-pow2")
+        subprocess.check_call(args, shell=True)
+    except Exception as ex:
+        Gimp.message("Error0: %s"%str(ex))
     
+
 def check_bc6_bc7(filename):
     try:
         args = [
@@ -55,6 +76,42 @@ def check_bc6_bc7(filename):
     except Exception as ex:
         Gimp.message("Error1: %s"%str(ex))
     return False
+
+def export_dds(procedure, run_mode, image, file, options, metadata, config, data):
+    if run_mode == Gimp.RunMode.INTERACTIVE:
+        GimpUi.init(procedure.get_name())
+        dialog = GimpUi.ProcedureDialog.new(procedure, config, "Export DDS...")
+        dialog.fill(None)
+        if not dialog.run():
+            dialog.destroy()
+            return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
+        # dialog.destroy()
+    Gimp.progress_init("Exporting dds image")
+    o_filename = file.peek_path()
+    fname = os.path.splitext(os.path.basename(o_filename))[0]
+    tempdir = tempfile.mkdtemp('gimp-plugin-file-dds-texconv')
+    tmp = os.path.join(tempdir, '%s.tga'%fname)
+
+    pdb_proc   = Gimp.get_pdb().lookup_procedure('file-tga-export')
+    pdb_config = pdb_proc.create_config()
+    pdb_config.set_property('run-mode', Gimp.RunMode.NONINTERACTIVE)
+    pdb_config.set_property('image', image)
+    pdb_config.set_property('file', Gio.File.new_for_path(tmp))
+    pdb_config.set_property('options', options)
+    pdb_config.set_property('rle', False)
+    pdb_config.set_property('origin', "top-left")
+    pdb_proc.run(pdb_config)
+
+    bMipmaps = config.get_property("bMipmaps")
+    bPow2 = config.get_property("bPow2")
+    conv_dds(tmp, os.path.dirname(o_filename), bMipmaps, bPow2)
+    os.remove(tmp)
+    Gimp.progress_end()
+
+    return Gimp.ValueArray.new_from_values([
+        GObject.Value(Gimp.PDBStatusType, Gimp.PDBStatusType.SUCCESS)
+    ])
 
 def load_dds(procedure, run_mode, file, metadata, flags, config, data):
     #if run_mode == Gimp.RunMode.INTERACTIVE:
@@ -87,14 +144,13 @@ class FileDDSTexconv (Gimp.PlugIn):
         return False
 
     def do_query_procedures(self):
-        return [ 'file-dds-texconv-load' ]
+        return [ 'file-dds-texconv-export' ]
 
     def do_create_procedure(self, name):
         if name == 'file-dds-texconv-load':
             procedure = Gimp.LoadProcedure.new (self, name,
                                                 Gimp.PDBProcType.PLUGIN,
                                                 load_dds, None)
-            procedure.set_menu_label("Load DDS (Texconv)")
             procedure.set_documentation ('load a DDS file with texconv.',
                                          'load a DDS file with texconv for GIMP3.',
                                          name)
@@ -104,6 +160,26 @@ class FileDDSTexconv (Gimp.PlugIn):
             #     "Load Alpha as Channel Instead of Transparency", 
             #     False, 
             #     GObject.ParamFlags.READWRITE)
+        elif name == 'file-dds-texconv-export':
+            procedure = Gimp.ExportProcedure.new(self, name,
+                                                 Gimp.PDBProcType.PLUGIN,
+                                                 False, export_dds, None)
+            procedure.set_image_types("*")
+            procedure.set_menu_label('DDS (BC7)')
+            procedure.set_documentation ('save an DDS file with texconv',
+                                         'save an DDS file with texconv',
+                                         name)
+            procedure.set_extensions ("bc7.dds")
+            procedure.add_boolean_argument(
+                "bMipmaps", "Mipmaps",
+                "Generate Mipmaps", 
+                True, 
+                GObject.ParamFlags.READWRITE)
+            procedure.add_boolean_argument(
+                "bPow2", "Fit power of 2",
+                "Fit texture to power-of-2 for width and height.",
+                False, 
+                GObject.ParamFlags.READWRITE)
         else:
             raise ValueError('Unknown procedure "%s"' % name)
         
